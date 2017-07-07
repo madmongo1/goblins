@@ -13,14 +13,25 @@ project(tiggle)
 set(CMAKE_CXX_STANDARD 14)
 
 hunter_add_package(Sugar)
-include (${SUGAR_ROOT}/cmake/Sugar)
-include (sugar_include)
-include (sugar_files)
+include(${SUGAR_ROOT}/cmake/Sugar)
+include(sugar_include)
+include(sugar_files)
+include(sugar_doxygen_generate)
 
 hunter_add_package(Boost COMPONENTS system)
 find_package(Boost REQUIRED COMPONENTS system)
+
+find_package(Doxygen QUIET)
 
 sugar_files(SOURCE_FILES config.hpp main.cpp run_pool.hpp worker_thread_service.hpp)
 
 add_executable(tiggle ${SOURCE_FILES})
 target_link_libraries(tiggle Boost::system)
+
+if (DOXYGEN_FOUND)
+    sugar_doxygen_generate(
+            DOXYFILE ${SUGAR_ROOT}/examples/Doxyfile.in
+            TARGET tiggle
+            DOXYTARGET tiggle-docs
+            DEVELOPER)
+endif ()
