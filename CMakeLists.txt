@@ -34,4 +34,6 @@ if (DOXYGEN_FOUND)
             TARGET tiggle
             DOXYTARGET tiggle-docs
             DEVELOPER)
+
+    add_custom_target(build-the-docs ALL DEPENDS tiggle-docs)
 endif ()

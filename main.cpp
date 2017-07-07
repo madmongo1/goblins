@@ -11,8 +11,6 @@
 
 
 
-
-
 class goblin_name_generator {
     struct impl {
         auto generate() {
@@ -60,9 +58,6 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
     };
 
     struct unborn : is_not_dead_traits {
-        void add_birth_handler(birth_handler_function f) {
-            birth_handlers_.push_back(std::move(f));
-        }
 
         auto take_birth_handlers() {
             auto copy = std::move(birth_handlers_);
@@ -81,20 +76,9 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
     };
 
     struct killing_folk : is_not_dead_traits {
-        void enter() {
-
-        }
-
-        void add_birth_handler(birth_handler_function f) {
-            // already alive - notify immediately
-            f();
-        }
     };
 
     struct dead : is_dead_traits {
-        void add_birth_handler(birth_handler_function f) {
-            // will never notify - dump it
-        }
     };
 
     using state_type = boost::variant<unborn, killing_folk, dead>;
@@ -104,15 +88,6 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
     }
 
     void stop() {
-
-    }
-
-    void add_birth_handler(std::function<void()> handler) {
-        auto lock = lock_type(mutex_);
-        boost::apply_visitor([&handler](auto &state) {
-                                 state.add_birth_handler(std::move(handler));
-                             },
-                             state_);
 
     }
 
@@ -228,8 +203,50 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
 
     template<class Handler>
     auto on_birth(implementation_type &impl, Handler &&handler) {
-        impl->add_birth_handler(make_async_completion_handler(std::forward<Handler>(handler)));
+        add_birth_handler(*impl,
+                          make_async_completion_handler(std::forward<Handler>(handler)));
     }
+
+    private:
+
+    template<class State, class Handler>
+    void add_birth_handler(impl_class& impl, State& state, Handler&& handler)
+    {
+        // do nothing
+    }
+
+    template<class Handler>
+    void add_birth_handler(impl_class& impl, impl_class::unborn& state, Handler&& handler)
+    {
+        state.birth_handlers_.emplace_back(std::forward<Handler>(handler));
+    }
+
+    template<class Handler>
+    void add_birth_handler(impl_class& impl, impl_class::killing_folk& state, Handler&& handler)
+    {
+        handler();
+    }
+
+    template<class Handler>
+    void add_birth_handler(impl_class& impl, impl_class::dead& state, Handler&& handler)
+    {
+        // do nothing - handler does not get called.
+    }
+
+
+    template<class Handler>
+    void add_birth_handler(impl_class& impl, Handler&& handler)
+    {
+        auto lock = impl.get_lock();
+
+        boost::apply_visitor([this, &impl, &handler](auto& state)
+        {
+            this->add_birth_handler(impl, state, std::forward<Handler>(handler));
+        },
+        impl.get_state());
+    }
+
+    public:
 
     auto name_copy(implementation_type const &impl) {
         return impl->name_copy();
@@ -251,6 +268,7 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
 
 
 private:
+
 
     void handle_be_born(impl_class& impl, impl_class::unborn& state)
     {
@@ -397,7 +415,7 @@ int main() {
 */
     }
     all_goblins([](auto &gob) {
-        gob.on_birth([&](auto &gob) {
+        gob.on_birth([](auto &gob) {
             std::cout << gob.name() << " lives!" << std::endl;
         });
     });
