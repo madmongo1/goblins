@@ -20,7 +20,7 @@ include (sugar_files)
 hunter_add_package(Boost COMPONENTS system)
 find_package(Boost REQUIRED COMPONENTS system)
 
-sugar_files(SOURCE_FILES main.cpp)
+sugar_files(SOURCE_FILES config.hpp main.cpp run_pool.hpp worker_thread_service.hpp)
 
 add_executable(tiggle ${SOURCE_FILES})
 target_link_libraries(tiggle Boost::system)

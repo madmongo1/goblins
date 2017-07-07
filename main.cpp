@@ -1,4 +1,7 @@
-#include <boost/asio.hpp>
+#include "config.hpp"
+#include "run_pool.hpp"
+#include "worker_thread_service.hpp"
+
 #include <boost/variant.hpp>
 #include <boost/signals2.hpp>
 #include <iostream>
@@ -7,79 +10,8 @@
 #include <array>
 
 
-namespace asio {
-    using namespace boost::asio;
-    using error_code = boost::system::error_code;
-}
-
-struct run_pool {
-    run_pool(asio::io_service &executor)
-            : executor_(executor) {}
-
-    ~run_pool() {
-        stop();
-    }
-
-    void add_thread() {
-        threads_.emplace_back([&, work = asio::io_service::work(executor_)] { this->run(); });
-    }
-
-    void stop() {
-        executor_.stop();
-        join_threads();
-    }
-
-    void join() {
-        run();
-        join_threads();
-    }
-
-private:
-
-    void join_threads() {
-        for (auto &&t : threads_) {
-            if (t.joinable()) t.join();
-        }
-        threads_.clear();
-    }
-
-    void run() {
-        while (!executor_.stopped()) {
-            try {
-                executor_.run();
-            }
-            catch (std::exception const &e) {
-                std::cerr << e.what() << std::endl;
-            }
-        }
-    }
-
-    asio::io_service &executor_;
-    std::vector<std::thread> threads_;
-};
 
 
-struct worker_thread_service : asio::detail::service_base<worker_thread_service> {
-
-    worker_thread_service(asio::io_service &owner)
-            : asio::detail::service_base<worker_thread_service>(owner) {
-        worker_pool_.add_thread();
-    }
-
-    auto get_worker_executor() -> asio::io_service&
-    {
-        return worker_executor_;
-    }
-
-    void shutdown_service() override
-    {
-        worker_pool_.stop();
-    }
-
-    asio::io_service worker_executor_;
-    run_pool worker_pool_ {worker_executor_};
-
-};
 
 class goblin_name_generator {
     struct impl {
@@ -173,17 +105,6 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
 
     void stop() {
 
-    }
-
-    template<class State>
-    void handle_be_born(State const& state)
-    {
-        std::cerr << "logic error - invalid state";
-    }
-    template<class State>
-    void handle_be_born(State& state)
-    {
-        std::cerr << "logic error - invalid state";
     }
 
     void add_birth_handler(std::function<void()> handler) {
