@@ -39,6 +39,9 @@ struct EventAddDeathHandler {
     std::function<void(asio::error_code const &)> handler_function;
 };
 
+/** A flag indicating that a goblin has died */
+struct PositivelyDead {};
+
 struct goblin_handler {
     template<class EVT, class FSM, class SourceState, class TargetState>
     void operator()(EVT const &event, FSM &fsm, SourceState &source, TargetState &target) const {
@@ -87,6 +90,9 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
     };
 
     struct Dead : msmf::state<> {
+
+        using flag_list = boost::mpl::vector1<PositivelyDead>;
+
         template<class Event, class FSM>
         void on_entry(Event const &, FSM &fsm) {
             fsm.fire_death_handlers(asio::error_code());
