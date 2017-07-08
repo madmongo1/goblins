@@ -48,13 +48,11 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
 
     void start() {
         auto lock = get_lock();
-        std::cout << "starting " << name_ << std::endl;
         goblin_state_.start();
     }
 
     void stop() {
         auto lock = get_lock();
-        std::cout << "stopping " << name_ << std::endl;
         goblin_state_.stop();
     }
 
@@ -96,11 +94,22 @@ struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
     auto get_executor() const -> asio::io_service& { return executor_; }
 
     template<class Message>
-    void process_event(Message const& message)
+    void process_event(Message&& message)
     {
         auto lock = get_lock();
         goblin_state_.process_event(message);
     }
+
+    template<class...Messages>
+    void process_events(Messages&&...msgs)
+    {
+        auto lock = get_lock();
+        using expand = int[];
+        void(expand{
+                (goblin_state_.process_event(msgs), 0)...
+        });
+    }
+
 
 
     asio::io_service& executor_;

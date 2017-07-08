@@ -47,7 +47,6 @@ private:
         while (!executor_.stopped()) {
             try {
                 auto ran = executor_.run();
-                std::cout << identifier_ << " ran " << ran << std::endl;
             }
             catch (std::exception const &e) {
                 std::cerr << e.what() << std::endl;

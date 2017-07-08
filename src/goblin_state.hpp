@@ -8,6 +8,8 @@
 #include <boost/optional.hpp>
 #include <iostream>
 
+#include "goblin_error.hpp"
+
 namespace msm = boost::msm;
 namespace msmf = boost::msm::front;
 namespace msmb = boost::msm::back;
@@ -26,15 +28,15 @@ struct GoblinKilledSomeone {
 };
 
 struct GoblinDies {
-    goblin_impl& impl;
+    goblin_impl &impl;
 };
 
 struct EventAddBirthHandler {
-    std::function<void()> handler_function;
+    std::function<void(asio::error_code const &)> handler_function;
 };
 
 struct EventAddDeathHandler {
-    std::function<void()> handler_function;
+    std::function<void(asio::error_code const &)> handler_function;
 };
 
 struct goblin_handler {
@@ -49,33 +51,29 @@ struct goblin_handler {
 
 
 struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
-    using state_signal = std::function<void()>;
+    using wait_signal = std::function<void(asio::error_code const &ec)>;
 
-    using birth_signal = state_signal;
+    using birth_signal = wait_signal;
+    using death_signal = wait_signal;
+
     struct Unborn : msmf::state<> {
-        std::vector<birth_signal> birth_signals;
 
         template<class Event, class FSM>
         void on_entry(Event const &event, FSM &fsm) {
-            std::cout << "entering Unborn" << std::endl;
         };
 
         template<class Event, class FSM>
         void on_exit(Event const &event, FSM &fsm) {
-            std::cout << "leaving Unborn" << std::endl;
-            for (auto &sig : birth_signals) {
-                sig();
-            }
-            birth_signals.clear();
         };
+
     };
 
     struct KillingFolk : msmf::state<> {
         boost::optional<asio::deadline_timer> kill_timer_;
 
         template<class Event, class FSM>
-        void on_entry(Event const &, FSM &) {
-
+        void on_entry(Event const &, FSM &fsm) {
+            fsm.fire_birth_handlers(asio::error_code());
         }
 
         template<class FSM>
@@ -83,7 +81,6 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
 
         template<class Event, class FSM>
         void on_exit(Event const &, FSM &) {
-            std::cout << "destroying timer" << std::endl;
             kill_timer_.reset();
         }
 
@@ -92,61 +89,55 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
     struct Dead : msmf::state<> {
         template<class Event, class FSM>
         void on_entry(Event const &, FSM &fsm) {
-            std::cout <<"firing death handlers" << std::endl;
-            fsm.fire_death_handlers();
+            fsm.fire_death_handlers(asio::error_code());
         }
     };
 
-    struct add_birth_handler : goblin_handler
-    {
+    struct add_birth_handler : goblin_handler {
         using goblin_handler::operator();
-/*
-        template<class EVT, class FSM, class SourceState, class TargetState>
-        void operator()(EVT const &event, FSM &fsm, SourceState &source, TargetState &target) {
 
-        }
-*/
         template<class FSM>
         void operator()(EventAddBirthHandler const &event, FSM &fsm, Unborn &source, Unborn &target) const {
-            std::cout << "storing born handler" << std::endl;
-            target.birth_signals.push_back(std::move(event.handler_function));
+            fsm.birth_signals.push_back(std::move(event.handler_function));
         }
 
         template<class FSM>
         void operator()(EventAddBirthHandler const &event, FSM &fsm, KillingFolk &source, KillingFolk &target) const {
-            std::cout << "firing born handler" << std::endl;
-            event.handler_function();
+            event.handler_function(asio::error_code());
         }
 
         template<class FSM>
         void operator()(EventAddBirthHandler const &event, FSM &fsm, Dead &source, Dead &target) const {
-            std::cout << "firing born handler" << std::endl;
-            event.handler_function();
+            event.handler_function(goblin_error::actually_dead);
         }
 
     };
 
-    struct add_death_handler : goblin_handler
-    {
+    struct add_death_handler : goblin_handler {
         using goblin_handler::operator();
+
         template<class FSM>
         void operator()(EventAddDeathHandler const &event, FSM &fsm, Unborn &source, Unborn &target) const {
-            std::cout << "storing death handler" << std::endl;
             fsm.death_signals.push_back(std::move(event.handler_function));
         }
 
         template<class FSM>
         void operator()(EventAddDeathHandler const &event, FSM &fsm, KillingFolk &source, KillingFolk &target) const {
-            std::cout << "storing death handler" << std::endl;
             fsm.death_signals.push_back(std::move(event.handler_function));
         }
 
         template<class FSM>
         void operator()(EventAddDeathHandler const &event, FSM &fsm, Dead &source, Dead &target) const {
-            std::cout << "running death handler" << std::endl;
-            fsm.fire_death_handlers();
+            event.handler_function(asio::error_code());
         }
 
+    };
+
+
+    template<class Fsm, class Event>
+    void on_exit(Fsm &fsm, Event const &event) {
+        fire_birth_handlers(asio::error::operation_aborted);
+        fire_death_handlers(asio::error::operation_aborted);
     };
 
 
@@ -164,7 +155,7 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
             msmf::Row<KillingFolk, GoblinDies, Dead>,
             msmf::Row<Dead, GoblinDies, msmf::none>,
 
-            msmf::Row<Unborn, GoblinBorn, KillingFolk, msmf::none>
+            msmf::Row<Unborn, GoblinBorn, KillingFolk>
     > {
     };
 
@@ -185,14 +176,23 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
         std::cerr << "exception caught = " << e.what() << " for " << typeid(ev).name() << std::endl;
     }
 
-    void fire_death_handlers() {
-        for (auto &sig : death_signals) {
-            sig();
+    void fire_wait_handlers(std::vector<wait_signal> &signals, asio::error_code const &ec) {
+        for (auto &sig : signals) {
+            sig(ec);
         }
-        death_signals.clear();
+        signals.clear();
     }
-    std::vector<state_signal> death_signals;
 
+    void fire_birth_handlers(asio::error_code const &ec) {
+        fire_wait_handlers(birth_signals, ec);
+    }
+
+    void fire_death_handlers(asio::error_code const &ec) {
+        fire_wait_handlers(death_signals, ec);
+    }
+
+    std::vector<birth_signal> birth_signals;
+    std::vector<death_signal> death_signals;
 };
 
 using GoblinState = msmb::state_machine<goblin_state_>;

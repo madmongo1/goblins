@@ -18,6 +18,22 @@
 
 #include "use_unique_future.hpp"
 
+template<class ...> using void_t = void;
+
+template<class, class = void>
+struct is_callable_with_error_code : std::false_type {
+};
+
+template<class F>
+struct is_callable_with_error_code
+        <F,
+                void_t<
+                        decltype(std::declval<F>()(std::declval<asio::error_code>()))
+                >
+        >
+        : std::true_type {
+};
+
 namespace msm = boost::msm;
 namespace msmf = boost::msm::front;
 namespace msmb = boost::msm::back;
@@ -86,18 +102,39 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
         auto work = asio::io_service::work(executor);
 
         return [&executor, work, handler = std::forward<Handler>(handler)](auto &&... args) mutable {
-            executor.post([handler, args...]() mutable { handler(args...); });
+            executor.post([handler, args...]() mutable {
+                handler(args...);
+            });
         };
     }
 
-    template<class Handler>
-    auto on_birth(implementation_type &impl, Handler &&handler) {
-        auto async_handler = make_async_completion_handler(std::forward<Handler>(handler));
+    template<class WaitHandler>
+    auto async_spawn(implementation_type &impl, WaitHandler &&handler) {
 
-        auto async_handler2 = async_handler;
-        auto callback = std::function<void()>(async_handler2);
-        impl->process_event(EventAddBirthHandler{callback});
-        add_birth_handler(*impl, async_handler);
+        asio::detail::async_result_init<
+                WaitHandler, void(boost::system::error_code)> init(
+                std::forward<WaitHandler>(handler));
+
+        auto async_handler = make_async_completion_handler(std::move(init.handler));
+        impl->process_events(EventAddBirthHandler{async_handler},
+                             GoblinBorn{*impl});
+
+        return init.result.get();
+    }
+
+    template<class WaitHandler>
+    auto on_birth(implementation_type &impl, WaitHandler &&handler) {
+
+        asio::detail::async_result_init<
+                WaitHandler, void(boost::system::error_code)> init(
+                std::forward<WaitHandler>(handler));
+
+        auto async_handler = make_async_completion_handler(std::move(init.handler));
+        impl->process_event(EventAddBirthHandler{async_handler});
+
+        //  service_impl_.async_wait(impl, init.handler);
+
+        return init.result.get();
     }
 
     /** cause a handler run when the goblin dies.
@@ -107,48 +144,21 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
      * @param handler
      * @return
      */
-    template<class Handler>
-    auto wait_death(implementation_type &impl, Handler &&handler) {
-        auto async_handler = make_async_completion_handler(std::forward<Handler>(handler));
-        auto callback = std::function<void()>(async_handler);
-        impl->process_event(EventAddDeathHandler{callback});
+
+    template<class WaitHandler>
+    auto wait_death(implementation_type &impl, WaitHandler &&handler) {
+
+        asio::detail::async_result_init<
+                WaitHandler, void(boost::system::error_code)> init(
+                std::forward<WaitHandler>(handler));
+
+        auto async_handler = make_async_completion_handler(std::move(init.handler));
+        impl->process_event(EventAddDeathHandler{async_handler});
+
+        //  service_impl_.async_wait(impl, init.handler);
+
+        return init.result.get();
     }
-
-
-private:
-
-    template<class State, class Handler>
-    void add_birth_handler(impl_class &impl, State &state, Handler &&handler) {
-        // do nothing
-    }
-
-    template<class Handler>
-    void add_birth_handler(impl_class &impl, impl_class::unborn &state, Handler &&handler) {
-        state.birth_handlers_.emplace_back(std::forward<Handler>(handler));
-    }
-
-    template<class Handler>
-    void add_birth_handler(impl_class &impl, impl_class::killing_folk &state, Handler &&handler) {
-        handler();
-    }
-
-    template<class Handler>
-    void add_birth_handler(impl_class &impl, impl_class::dead &state, Handler &&handler) {
-        // do nothing - handler does not get called.
-    }
-
-
-    template<class Handler>
-    void add_birth_handler(impl_class &impl, Handler &&handler) {
-        auto lock = impl.get_lock();
-
-        boost::apply_visitor([this, &impl, &handler](auto &state) {
-                                 this->add_birth_handler(impl, state, std::forward<Handler>(handler));
-                             },
-                             impl.get_state());
-    }
-
-public:
 
     auto name_copy(implementation_type const &impl) {
         return impl->name_copy();
@@ -160,14 +170,7 @@ public:
 
     auto be_born(implementation_type &impl) {
         // let's implement this as a background job
-        auto weak_impl = impl->get_weak_ptr();
-        auto my_work = asio::io_service::work(get_io_service());
-        worker_service_.get_worker_executor().post([this, my_work, weak_impl]() {
-            if (auto impl = weak_impl.lock()) {
-                impl->process_event(GoblinBorn{*impl});
-                this->handle_be_born(*impl);
-            }
-        });
+        impl->process_event(GoblinBorn{*impl});
     }
 
     auto die(implementation_type &impl) {
@@ -177,29 +180,10 @@ public:
 
 private:
 
-
-    void handle_be_born(impl_class &impl, impl_class::unborn &state) {
-        auto lock = impl.get_lock();
-        auto handlers = state.take_birth_handlers();
-        impl.set_state(impl_class::killing_folk());
-        lock.unlock();
-        impl_class::unborn::fire_birth_handlers(handlers);
-    }
-
-    template<class InvalidState>
-    void handle_be_born(impl_class &impl, InvalidState &state) {
-        std::cerr << "invalid state to be born in" << std::endl;
-    }
-
-    void handle_be_born(impl_class &impl) {
-        boost::apply_visitor([this, &impl](auto &state) { this->handle_be_born(impl, state); }, impl.get_state());
-    }
-
     auto get_worker_executor() const -> asio::io_service & {
         return worker_service_.get_worker_executor();
     }
 
-private:
     using cache_mutex = std::mutex;
     using cache_lock = std::unique_lock<cache_mutex>;
     using goblin_cache = std::set<std::weak_ptr<goblin_impl>, std::owner_less<std::weak_ptr<goblin_impl>>>;
@@ -229,6 +213,16 @@ struct goblin {
     goblin(asio::io_service &owner) :
             service_(std::addressof(asio::use_service<service_type>(owner))),
             impl_(get_service().construct()) {}
+
+    template<class WaitHandler>
+    goblin(asio::io_service &owner, WaitHandler&& handler) :
+            service_(std::addressof(asio::use_service<service_type>(owner))),
+            impl_(get_service().construct()) {
+
+        get_service().on_birth(get_implementation(), std::forward<WaitHandler>(handler));
+        be_born();
+    }
+
 
     // allow goblins to be privately, - don't store copies in client code
 private:
@@ -265,6 +259,11 @@ public:
         return get_service().get_io_service();
     }
 
+    template<class Handler>
+    auto async_spawn(Handler &&handler) {
+        return get_service().async_spawn(get_implementation(), std::forward<Handler>(handler));
+    }
+
     /** Request the goblin to call a handler when born.
      * The handler shall be called exactly once, as if by a call to get_executor().post().
      * The handler will be invoked with the signature void(goblin&). The handler may use the
@@ -276,10 +275,7 @@ public:
      */
     template<class Handler>
     auto on_birth(Handler &&handler) {
-        get_service().on_birth(get_implementation(),
-                               [self = *this, handler = std::forward<Handler>(handler)]() mutable {
-                                   handler(self);
-                               });
+        return get_service().on_birth(get_implementation(), std::forward<Handler>(handler));
     }
 
     /** Request the goblin to call a handler when it dies (or if it's already dead).
@@ -291,12 +287,15 @@ public:
      * @param handler
      * @return
      */
-    template<class Handler>
-    auto wait_death(Handler &&handler) {
-        get_service().wait_death(get_implementation(),
-                                 [self = *this, handler = std::forward<Handler>(handler)]() mutable {
-                                     handler(self);
-                                 });
+
+    template<class WaitHandler>
+    auto wait_death(WaitHandler &&handler) {
+        // If you get an error on the following line it means that your handler does
+        // not meet the documented type requirements for a WaitHandler.
+        //BOOST_ASIO_WAIT_HANDLER_CHECK(WaitHandler, handler) type_check;
+
+        return get_service().wait_death(get_implementation(),
+                                        std::forward<WaitHandler>(handler));
     }
 
     auto name() const -> std::string {
@@ -329,10 +328,39 @@ private:
 };
 
 
+template<class AsioExecutor>
+struct asio_executor
+{
+    asio_executor(AsioExecutor& exec) : executor_(exec) {}
+
+    void close() { executor_.stop(); }
+    bool closed() { return executor_.stopped(); }
+
+    template<class Closure>
+    void submit(Closure&& closure) {
+        executor_.dispatch(std::forward<Closure>(closure));
+    }
+
+    bool try_executing_one() {
+        auto ran = executor_.poll_one();
+        return ran != 0;
+    }
+
+private:
+    AsioExecutor& executor_;
+};
+
+template<class AsioExecutor>
+auto make_asio_executor(AsioExecutor& exec) {
+    return asio_executor<AsioExecutor>(exec);
+}
+
 int main() {
 
     asio::io_service executor;
     run_pool pool_of_life(executor, "pool of life");
+    auto goblin_exec = make_asio_executor(executor);
+
 
     std::vector<goblin> goblins;
     auto all_dead = [&]() {
@@ -351,42 +379,49 @@ int main() {
 
     for (int i = 0; i < 3; ++i) {
         goblins.emplace_back(executor);
-/*
-        goblins.on_death([&](auto& gob){
-            if (all_dead()) {
-                pool_of_life.stop();
-            }
-        });
-*/
     }
-    all_goblins([](auto &gob) {
-        gob.on_birth([](auto &gob) {
-            std::cout << gob.name() << " lives!" << std::endl;
-        });
-    });
 
-    all_goblins([](auto &gob) {
-        gob.be_born();
+    all_goblins([&](auto &gob) {
+        gob.async_spawn(use_unique_future)
+                .then(goblin_exec, [name = gob.name()](auto f) {
+                    try {
+                        f.get();
+                        std::cout << std::this_thread::get_id() << " : " << name << " lives!" << std::endl;
+                    }
+                    catch (std::exception const &e) {
+                        std::cout << name << " not alive because: " << e.what() << std::endl;
+                    }
+                });
     });
 
     asio::deadline_timer t(executor);
     t.expires_from_now(boost::posix_time::seconds(1));
-    t.async_wait(use_unique_future).then([&](auto f)
-    {
-        try {
-            f.get();
-            all_goblins([](auto &gob) { gob.die(); });
-        }
-        catch (...) {
+    t.async_wait(use_unique_future)
+            .then(goblin_exec, [&](auto f) {
+                try {
+                    f.get();
+                    all_goblins([](auto &gob) { gob.die(); });
+                }
+                catch (...) {
 
-        }
-    });
+                }
+            });
 
     all_goblins([&](auto &gob) {
-        gob.wait_death([&](auto &gob) {
-            std::cout << gob.name() << " died";
-        });
+        gob.wait_death(use_unique_future)
+                .then(goblin_exec, [name = gob.name()](auto &&f) {
+                    try {
+                        f.get();
+                        std::cout << name << " died" << std::endl;
+                    }
+                    catch (...) {
+                        std::cout << name << " was deleted before he could even die!\n";
+                    }
+                });
     });
+
+
+
 
 
     pool_of_life.join();

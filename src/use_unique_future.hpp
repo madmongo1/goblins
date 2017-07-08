@@ -11,6 +11,7 @@
 
 #define BOOST_RESULT_OF_USE_DECLTYPE
 #define BOOST_THREAD_PROVIDES_FUTURE_CONTINUATION
+#define BOOST_THREAD_PROVIDES_EXECUTORS
 
 #include <boost/asio.hpp>
 #include <boost/date_time/posix_time/posix_time.hpp>
