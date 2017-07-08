@@ -34,21 +34,17 @@ struct is_callable_with_error_code
         : std::true_type {
 };
 
-namespace msm = boost::msm;
-namespace msmf = boost::msm::front;
-namespace msmb = boost::msm::back;
-
-
-struct goblin_impl_proxy {
-    goblin_impl_proxy(std::shared_ptr<goblin_impl> impl)
+template<class Implementation>
+struct impl_proxy {
+    impl_proxy(std::shared_ptr<Implementation> impl)
             : impl_(impl) {
     }
 
-    goblin_impl_proxy(const goblin_impl_proxy &) = delete;
+    impl_proxy(const impl_proxy &) = delete;
 
-    goblin_impl_proxy &operator=(const goblin_impl_proxy &) = delete;
+    impl_proxy &operator=(const impl_proxy &) = delete;
 
-    ~goblin_impl_proxy() {
+    ~impl_proxy() {
         if (started_) {
             impl_->stop();
         }
@@ -59,16 +55,18 @@ struct goblin_impl_proxy {
         started_ = true;
     }
 
-    auto get_impl_ptr() -> goblin_impl * {
+    auto get_impl_ptr() -> Implementation * {
         return impl_.get();
     }
 
-    std::shared_ptr<goblin_impl> impl_;
+    std::shared_ptr<Implementation> impl_;
     bool started_ = false;
 };
 
 struct goblin_service : asio::detail::service_base<goblin_service> {
     using impl_class = goblin_impl;
+
+    using implementation_proxy = impl_proxy<impl_class>;
 
     /* specify the relationship between handle and implementation here */
     using implementation_type = std::shared_ptr<impl_class>;
@@ -86,7 +84,7 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
          */
 
         auto shared_impl = std::make_shared<impl_class>(get_worker_executor(), name_generator_());
-        auto proxy = std::make_shared<goblin_impl_proxy>(shared_impl);
+        auto proxy = std::make_shared<implementation_proxy>(shared_impl);
         // use the lifetime of the proxy to refer to the implementation
         auto result = implementation_type {proxy, proxy->get_impl_ptr()};
         auto lock = cache_lock(cache_mutex_);
@@ -206,7 +204,73 @@ private:
  * Then it will kill people at random until it is killed.
  * It will report to any interested listeners that it has killed someone or it has died.
  */
-struct goblin {
+template<class Outer>
+struct goblin_interface {
+    template<class Handler>
+    auto async_spawn(Handler &&handler) {
+        auto self = outer_self();
+        return self->get_service().async_spawn(self->get_implementation(),
+                                               std::forward<Handler>(handler));
+    }
+
+    auto name() const -> std::string {
+        auto self = outer_self();
+        return self->get_service().name_copy(self->get_implementation());
+    }
+
+    bool is_dead() const {
+        auto self = outer_self();
+        return self->get_service().is_dead(self->get_implementation());
+    }
+
+    void be_born() {
+        auto self = outer_self();
+        self->get_service().be_born(self->get_implementation());
+    }
+
+    void die() {
+        auto self = outer_self();
+        self->get_service().die(self->get_implementation());
+    }
+
+private:
+    Outer *outer_self() { return static_cast<Outer *>(this); }
+
+    const Outer *outer_self() const { return static_cast<const Outer *>(this); }
+};
+
+struct goblin_ref : goblin_interface<goblin_ref> {
+    using service_type = goblin_service;
+    using implementation_type = goblin_service::implementation_type;
+
+    goblin_ref(service_type &service, implementation_type impl)
+            : service_(std::addressof(service)),
+              impl_(std::move(impl)) {}
+
+    auto get_implementation() -> implementation_type & {
+        return impl_;
+    }
+
+    auto get_implementation() const -> implementation_type const & {
+        return impl_;
+    }
+
+    auto get_service() const -> service_type & {
+        return *service_;
+    }
+
+    auto get_executor() const -> asio::io_service & {
+        return get_service().get_io_service();
+    }
+
+
+private:
+    service_type *service_;
+    implementation_type impl_;
+
+};
+
+struct goblin : goblin_interface<goblin> {
     using service_type = goblin_service;
     using implementation_type = goblin_service::implementation_type;
 
@@ -215,7 +279,7 @@ struct goblin {
             impl_(get_service().construct()) {}
 
     template<class WaitHandler>
-    goblin(asio::io_service &owner, WaitHandler&& handler) :
+    goblin(asio::io_service &owner, WaitHandler &&handler) :
             service_(std::addressof(asio::use_service<service_type>(owner))),
             impl_(get_service().construct()) {
 
@@ -223,6 +287,13 @@ struct goblin {
         be_born();
     }
 
+    operator goblin_ref() const {
+        return goblin_ref(get_service(), get_implementation().get()->shared_from_this());
+    }
+
+    auto ref() const {
+        return goblin_ref(*this);
+    }
 
     // allow goblins to be privately, - don't store copies in client code
 private:
@@ -259,10 +330,6 @@ public:
         return get_service().get_io_service();
     }
 
-    template<class Handler>
-    auto async_spawn(Handler &&handler) {
-        return get_service().async_spawn(get_implementation(), std::forward<Handler>(handler));
-    }
 
     /** Request the goblin to call a handler when born.
      * The handler shall be called exactly once, as if by a call to get_executor().post().
@@ -298,21 +365,6 @@ public:
                                         std::forward<WaitHandler>(handler));
     }
 
-    auto name() const -> std::string {
-        return get_service().name_copy(get_implementation());
-    }
-
-    bool is_dead() const {
-        return get_service().is_dead(get_implementation());
-    }
-
-    void be_born() {
-        get_service().be_born(get_implementation());
-    }
-
-    void die() {
-        get_service().die(get_implementation());
-    }
 
     auto get_implementation() -> implementation_type & {
         return impl_;
@@ -329,15 +381,15 @@ private:
 
 
 template<class AsioExecutor>
-struct asio_executor
-{
-    asio_executor(AsioExecutor& exec) : executor_(exec) {}
+struct asio_executor {
+    asio_executor(AsioExecutor &exec) : executor_(exec) {}
 
     void close() { executor_.stop(); }
+
     bool closed() { return executor_.stopped(); }
 
     template<class Closure>
-    void submit(Closure&& closure) {
+    void submit(Closure &&closure) {
         executor_.dispatch(std::forward<Closure>(closure));
     }
 
@@ -347,11 +399,11 @@ struct asio_executor
     }
 
 private:
-    AsioExecutor& executor_;
+    AsioExecutor &executor_;
 };
 
 template<class AsioExecutor>
-auto make_asio_executor(AsioExecutor& exec) {
+auto make_asio_executor(AsioExecutor &exec) {
     return asio_executor<AsioExecutor>(exec);
 }
 
@@ -407,21 +459,21 @@ int main() {
                 }
             });
 
+
     all_goblins([&](auto &gob) {
         gob.wait_death(use_unique_future)
-                .then(goblin_exec, [name = gob.name()](auto &&f) {
+                .then(goblin_exec, [mygoblin = gob.ref()](auto &&f) {
                     try {
                         f.get();
-                        std::cout << name << " died" << std::endl;
+                        std::cout << mygoblin.name() << " died" << std::endl;
                     }
                     catch (...) {
-                        std::cout << name << " was deleted before he could even die!\n";
+                        std::cout << mygoblin.name() << " was deleted before he could even die!\n";
                     }
                 });
     });
 
-
-
+    goblins.erase(goblins.begin() + 2);
 
 
     pool_of_life.join();
