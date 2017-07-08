@@ -25,14 +25,34 @@ struct GoblinKilledSomeone {
 
 };
 
+struct GoblinDies {
+    goblin_impl& impl;
+};
+
 struct EventAddBirthHandler {
     std::function<void()> handler_function;
 };
 
+struct EventAddDeathHandler {
+    std::function<void()> handler_function;
+};
+
+struct goblin_handler {
+    template<class EVT, class FSM, class SourceState, class TargetState>
+    void operator()(EVT const &event, FSM &fsm, SourceState &source, TargetState &target) const {
+        std::cerr << "uncoded transition. EVT: " << typeid(event).name()
+                  << " FSM: " << typeid(fsm).name()
+                  << " SourceState: " << typeid(source).name()
+                  << " TargetState: " << typeid(target).name() << std::endl;
+    }
+};
+
 
 struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
+    using state_signal = std::function<void()>;
+
+    using birth_signal = state_signal;
     struct Unborn : msmf::state<> {
-        using birth_signal = std::function<void()>;
         std::vector<birth_signal> birth_signals;
 
         template<class Event, class FSM>
@@ -70,18 +90,61 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
     };
 
     struct Dead : msmf::state<> {
+        template<class Event, class FSM>
+        void on_entry(Event const &, FSM &fsm) {
+            std::cout <<"firing death handlers" << std::endl;
+            fsm.fire_death_handlers();
+        }
     };
 
-    struct ActionAddBirthHandler {
+    struct add_birth_handler : goblin_handler
+    {
+        using goblin_handler::operator();
+/*
         template<class EVT, class FSM, class SourceState, class TargetState>
         void operator()(EVT const &event, FSM &fsm, SourceState &source, TargetState &target) {
 
         }
+*/
+        template<class FSM>
+        void operator()(EventAddBirthHandler const &event, FSM &fsm, Unborn &source, Unborn &target) const {
+            std::cout << "storing born handler" << std::endl;
+            target.birth_signals.push_back(std::move(event.handler_function));
+        }
 
         template<class FSM>
-        void operator()(EventAddBirthHandler const &event, FSM &fsm, Unborn &source, Unborn &target) {
-            std::cout << "born" << std::endl;
-            target.birth_signals.push_back(std::move(event.handler_function));
+        void operator()(EventAddBirthHandler const &event, FSM &fsm, KillingFolk &source, KillingFolk &target) const {
+            std::cout << "firing born handler" << std::endl;
+            event.handler_function();
+        }
+
+        template<class FSM>
+        void operator()(EventAddBirthHandler const &event, FSM &fsm, Dead &source, Dead &target) const {
+            std::cout << "firing born handler" << std::endl;
+            event.handler_function();
+        }
+
+    };
+
+    struct add_death_handler : goblin_handler
+    {
+        using goblin_handler::operator();
+        template<class FSM>
+        void operator()(EventAddDeathHandler const &event, FSM &fsm, Unborn &source, Unborn &target) const {
+            std::cout << "storing death handler" << std::endl;
+            fsm.death_signals.push_back(std::move(event.handler_function));
+        }
+
+        template<class FSM>
+        void operator()(EventAddDeathHandler const &event, FSM &fsm, KillingFolk &source, KillingFolk &target) const {
+            std::cout << "storing death handler" << std::endl;
+            fsm.death_signals.push_back(std::move(event.handler_function));
+        }
+
+        template<class FSM>
+        void operator()(EventAddDeathHandler const &event, FSM &fsm, Dead &source, Dead &target) const {
+            std::cout << "running death handler" << std::endl;
+            fsm.fire_death_handlers();
         }
 
     };
@@ -90,15 +153,29 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
     using initial_state = Unborn;
 
     struct transition_table : boost::mpl::vector<
-            msmf::Row<Unborn, EventAddBirthHandler, msmf::none, ActionAddBirthHandler>,
-            msmf::Row<Unborn, GoblinBorn, KillingFolk, msmf::none>,
-            msmf::Row<KillingFolk, EventAddBirthHandler, msmf::none, ActionAddBirthHandler>
+            msmf::Row<Unborn, EventAddBirthHandler, msmf::none, add_birth_handler>,
+            msmf::Row<KillingFolk, EventAddBirthHandler, msmf::none, add_birth_handler>,
+            msmf::Row<Dead, EventAddBirthHandler, msmf::none, add_birth_handler>,
+
+            msmf::Row<Unborn, EventAddDeathHandler, msmf::none, add_death_handler>,
+            msmf::Row<KillingFolk, EventAddDeathHandler, msmf::none, add_death_handler>,
+            msmf::Row<Dead, EventAddDeathHandler, msmf::none, add_death_handler>,
+
+            msmf::Row<KillingFolk, GoblinDies, Dead>,
+            msmf::Row<Dead, GoblinDies, msmf::none>,
+
+            msmf::Row<Unborn, GoblinBorn, KillingFolk, msmf::none>
+    > {
+    };
+
+    struct internal_transition_table : boost::mpl::vector<
+//            msmf::Internal<EventAddBirthHandler, add_birth_handler>
     > {
     };
 
     // Default no-transition handler. Can be replaced in the Derived SM class.
     template<class FSM, class Event>
-    void no_transition(Event const & e, FSM &, int n) {
+    void no_transition(Event const &e, FSM &, int n) {
         std::cerr << "no transition state = " << n << " for " << typeid(e).name() << std::endl;
     }
 
@@ -107,6 +184,14 @@ struct goblin_state_ : msmf::state_machine_def<goblin_state_> {
     void exception_caught(Event const &ev, FSM &, std::exception &e) {
         std::cerr << "exception caught = " << e.what() << " for " << typeid(ev).name() << std::endl;
     }
+
+    void fire_death_handlers() {
+        for (auto &sig : death_signals) {
+            sig();
+        }
+        death_signals.clear();
+    }
+    std::vector<state_signal> death_signals;
 
 };
 

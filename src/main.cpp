@@ -16,6 +16,8 @@
 #include <boost/msm/front/functor_row.hpp>
 #include <boost/msm/front/common_states.hpp>
 
+#include "use_unique_future.hpp"
+
 namespace msm = boost::msm;
 namespace msmf = boost::msm::front;
 namespace msmb = boost::msm::back;
@@ -98,6 +100,21 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
         add_birth_handler(*impl, async_handler);
     }
 
+    /** cause a handler run when the goblin dies.
+     * The handler will be called exactly once.
+     * @tparam Handler
+     * @param impl
+     * @param handler
+     * @return
+     */
+    template<class Handler>
+    auto wait_death(implementation_type &impl, Handler &&handler) {
+        auto async_handler = make_async_completion_handler(std::forward<Handler>(handler));
+        auto callback = std::function<void()>(async_handler);
+        impl->process_event(EventAddDeathHandler{callback});
+    }
+
+
 private:
 
     template<class State, class Handler>
@@ -151,6 +168,10 @@ public:
                 this->handle_be_born(*impl);
             }
         });
+    }
+
+    auto die(implementation_type &impl) {
+        impl->process_event(GoblinDies{*impl});
     }
 
 
@@ -212,8 +233,7 @@ struct goblin {
     // allow goblins to be privately, - don't store copies in client code
 private:
     goblin(goblin const &r)
-            : service_(r.service_)
-            , impl_(r.get_implementation()->shared_from_this()) {}
+            : service_(r.service_), impl_(r.get_implementation()->shared_from_this()) {}
 
     goblin &operator=(goblin const &) = delete;
 
@@ -262,6 +282,23 @@ public:
                                });
     }
 
+    /** Request the goblin to call a handler when it dies (or if it's already dead).
+     * The handler shall be called exactly once, as if by a call to get_executor().post().
+     * The handler will be invoked with the signature void(goblin&). The handler may use the
+     * goblin reference to perform gobliny actions but should not seek to store or copy it as it
+     * maintains a shared reference to the internal goblin state
+     * @tparam Handler
+     * @param handler
+     * @return
+     */
+    template<class Handler>
+    auto wait_death(Handler &&handler) {
+        get_service().wait_death(get_implementation(),
+                                 [self = *this, handler = std::forward<Handler>(handler)]() mutable {
+                                     handler(self);
+                                 });
+    }
+
     auto name() const -> std::string {
         return get_service().name_copy(get_implementation());
     }
@@ -272,6 +309,10 @@ public:
 
     void be_born() {
         get_service().be_born(get_implementation());
+    }
+
+    void die() {
+        get_service().die(get_implementation());
     }
 
     auto get_implementation() -> implementation_type & {
@@ -326,6 +367,25 @@ int main() {
 
     all_goblins([](auto &gob) {
         gob.be_born();
+    });
+
+    asio::deadline_timer t(executor);
+    t.expires_from_now(boost::posix_time::seconds(1));
+    t.async_wait(use_unique_future).then([&](auto f)
+    {
+        try {
+            f.get();
+            all_goblins([](auto &gob) { gob.die(); });
+        }
+        catch (...) {
+
+        }
+    });
+
+    all_goblins([&](auto &gob) {
+        gob.wait_death([&](auto &gob) {
+            std::cout << gob.name() << " died";
+        });
     });
 
 

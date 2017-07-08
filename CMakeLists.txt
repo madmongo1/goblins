@@ -18,15 +18,15 @@ include(sugar_include)
 include(sugar_files)
 include(sugar_doxygen_generate)
 
-hunter_add_package(Boost COMPONENTS system)
-find_package(Boost REQUIRED COMPONENTS system)
+hunter_add_package(Boost COMPONENTS system thread)
+find_package(Boost REQUIRED COMPONENTS system thread)
 
 find_package(Doxygen QUIET)
 
 sugar_include(src)
 
 add_executable(tiggle ${SOURCE_FILES})
-target_link_libraries(tiggle Boost::system)
+target_link_libraries(tiggle Boost::system Boost::thread)
 target_include_directories(tiggle PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if (DOXYGEN_FOUND)
