@@ -1,6 +1,8 @@
 #include "config.hpp"
 #include "run_pool.hpp"
 #include "worker_thread_service.hpp"
+#include "goblin_name_generator.hpp"
+#include "goblin_impl.hpp"
 
 #include <boost/variant.hpp>
 #include <boost/signals2.hpp>
@@ -9,130 +11,15 @@
 #include <thread>
 #include <array>
 
+#include <boost/msm/front/state_machine_def.hpp>
+#include <boost/msm/back/state_machine.hpp>
+#include <boost/msm/front/functor_row.hpp>
+#include <boost/msm/front/common_states.hpp>
 
+namespace msm = boost::msm;
+namespace msmf = boost::msm::front;
+namespace msmb = boost::msm::back;
 
-class goblin_name_generator {
-    struct impl {
-        auto generate() {
-            auto result = names[pos];
-            if (iteration) {
-                result += " " + std::to_string(iteration);
-            }
-            if (++pos >= names.size()) {
-                iteration++;
-                pos = 0;
-            }
-            return result;
-        }
-
-        int iteration = 0;
-        int pos = 0;
-        std::array<std::string, 3> names = {"yarr!", "gnurgghhh!", "fgumschak!"};
-    };
-
-    static impl &get_impl() {
-        static impl _{};
-        return _;
-    }
-
-public:
-    std::string operator()() const {
-        return get_impl().generate();
-    }
-};
-
-/* Implementations of goblins are active objects. They are controlled by shared pointers.
- * */
-struct goblin_impl : std::enable_shared_from_this<goblin_impl> {
-
-    goblin_impl(std::string name) : name_(name) {}
-
-    using birth_handler_function = std::function<void()>;
-
-    struct is_dead_traits {
-        static constexpr bool is_dead() { return true; }
-    };
-
-    struct is_not_dead_traits {
-        static constexpr bool is_dead() { return true; }
-    };
-
-    struct unborn : is_not_dead_traits {
-
-        auto take_birth_handlers() {
-            auto copy = std::move(birth_handlers_);
-            birth_handlers_.clear();
-            return copy;
-        }
-
-        static auto fire_birth_handlers(std::vector<birth_handler_function>& handlers)
-        {
-            for (auto &handler : handlers) {
-                handler();
-            }
-        }
-
-        std::vector<birth_handler_function> birth_handlers_;
-    };
-
-    struct killing_folk : is_not_dead_traits {
-    };
-
-    struct dead : is_dead_traits {
-    };
-
-    using state_type = boost::variant<unborn, killing_folk, dead>;
-
-    void start() {
-
-    }
-
-    void stop() {
-
-    }
-
-    auto name_copy() const {
-        auto lock = lock_type(mutex_);
-        return name_;
-    }
-
-    bool is_dead() const {
-        auto lock = lock_type(mutex_);
-        return boost::apply_visitor([](auto const &state) {
-                                        return state.is_dead();
-                                    },
-                                    state_);
-    }
-
-    auto get_weak_ptr()  {
-        return std::weak_ptr<goblin_impl>(shared_from_this());
-    }
-    auto get_weak_ptr() const {
-        return std::weak_ptr<goblin_impl const>(shared_from_this());
-    }
-
-    template<class NewState>
-    auto set_state(NewState&& ns) -> NewState&
-    {
-        state_ = std::forward<NewState>(ns);
-        return boost::get<NewState>(state_);
-    }
-
-    auto get_lock() const { return lock_type(mutex_); }
-
-    auto get_state() -> state_type& {
-        return state_;
-    }
-
-
-
-    using mutex_type = std::mutex;
-    using lock_type = std::unique_lock<mutex_type>;
-
-    mutable mutex_type mutex_;
-    std::string name_;
-    state_type state_ = unborn();
-};
 
 struct goblin_impl_proxy {
     goblin_impl_proxy(std::shared_ptr<goblin_impl> impl)
@@ -180,7 +67,7 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
          *        an orderly shutdown.
          */
 
-        auto shared_impl = std::make_shared<impl_class>(name_generator_());
+        auto shared_impl = std::make_shared<impl_class>(get_worker_executor(), name_generator_());
         auto proxy = std::make_shared<goblin_impl_proxy>(shared_impl);
         // use the lifetime of the proxy to refer to the implementation
         auto result = implementation_type {proxy, proxy->get_impl_ptr()};
@@ -203,50 +90,48 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
 
     template<class Handler>
     auto on_birth(implementation_type &impl, Handler &&handler) {
-        add_birth_handler(*impl,
-                          make_async_completion_handler(std::forward<Handler>(handler)));
+        auto async_handler = make_async_completion_handler(std::forward<Handler>(handler));
+
+        auto async_handler2 = async_handler;
+        auto callback = std::function<void()>(async_handler2);
+        impl->process_event(EventAddBirthHandler{callback});
+        add_birth_handler(*impl, async_handler);
     }
 
-    private:
+private:
 
     template<class State, class Handler>
-    void add_birth_handler(impl_class& impl, State& state, Handler&& handler)
-    {
+    void add_birth_handler(impl_class &impl, State &state, Handler &&handler) {
         // do nothing
     }
 
     template<class Handler>
-    void add_birth_handler(impl_class& impl, impl_class::unborn& state, Handler&& handler)
-    {
+    void add_birth_handler(impl_class &impl, impl_class::unborn &state, Handler &&handler) {
         state.birth_handlers_.emplace_back(std::forward<Handler>(handler));
     }
 
     template<class Handler>
-    void add_birth_handler(impl_class& impl, impl_class::killing_folk& state, Handler&& handler)
-    {
+    void add_birth_handler(impl_class &impl, impl_class::killing_folk &state, Handler &&handler) {
         handler();
     }
 
     template<class Handler>
-    void add_birth_handler(impl_class& impl, impl_class::dead& state, Handler&& handler)
-    {
+    void add_birth_handler(impl_class &impl, impl_class::dead &state, Handler &&handler) {
         // do nothing - handler does not get called.
     }
 
 
     template<class Handler>
-    void add_birth_handler(impl_class& impl, Handler&& handler)
-    {
+    void add_birth_handler(impl_class &impl, Handler &&handler) {
         auto lock = impl.get_lock();
 
-        boost::apply_visitor([this, &impl, &handler](auto& state)
-        {
-            this->add_birth_handler(impl, state, std::forward<Handler>(handler));
-        },
-        impl.get_state());
+        boost::apply_visitor([this, &impl, &handler](auto &state) {
+                                 this->add_birth_handler(impl, state, std::forward<Handler>(handler));
+                             },
+                             impl.get_state());
     }
 
-    public:
+public:
 
     auto name_copy(implementation_type const &impl) {
         return impl->name_copy();
@@ -256,11 +141,13 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
         return impl->is_dead();
     }
 
-    auto be_born(implementation_type& impl) {
+    auto be_born(implementation_type &impl) {
         // let's implement this as a background job
         auto weak_impl = impl->get_weak_ptr();
-        worker_service_.get_worker_executor().post([this, weak_impl]() {
+        auto my_work = asio::io_service::work(get_io_service());
+        worker_service_.get_worker_executor().post([this, my_work, weak_impl]() {
             if (auto impl = weak_impl.lock()) {
+                impl->process_event(GoblinBorn{*impl});
                 this->handle_be_born(*impl);
             }
         });
@@ -270,8 +157,7 @@ struct goblin_service : asio::detail::service_base<goblin_service> {
 private:
 
 
-    void handle_be_born(impl_class& impl, impl_class::unborn& state)
-    {
+    void handle_be_born(impl_class &impl, impl_class::unborn &state) {
         auto lock = impl.get_lock();
         auto handlers = state.take_birth_handlers();
         impl.set_state(impl_class::killing_folk());
@@ -280,18 +166,17 @@ private:
     }
 
     template<class InvalidState>
-    void handle_be_born(impl_class& impl, InvalidState& state)
-    {
+    void handle_be_born(impl_class &impl, InvalidState &state) {
         std::cerr << "invalid state to be born in" << std::endl;
     }
 
-    void handle_be_born(impl_class& impl)
-    {
-        boost::apply_visitor([this, &impl](auto& state){ this->handle_be_born(impl, state); }, impl.get_state());
+    void handle_be_born(impl_class &impl) {
+        boost::apply_visitor([this, &impl](auto &state) { this->handle_be_born(impl, state); }, impl.get_state());
     }
 
-
-
+    auto get_worker_executor() const -> asio::io_service & {
+        return worker_service_.get_worker_executor();
+    }
 
 private:
     using cache_mutex = std::mutex;
@@ -302,7 +187,7 @@ private:
 
     }
 
-    worker_thread_service& worker_service_ = asio::use_service<worker_thread_service>(get_io_service());
+    worker_thread_service &worker_service_ = asio::use_service<worker_thread_service>(get_io_service());
     cache_mutex cache_mutex_;
     goblin_cache goblin_cache_;
     goblin_name_generator name_generator_{};
@@ -326,9 +211,11 @@ struct goblin {
 
     // allow goblins to be privately, - don't store copies in client code
 private:
-    goblin(goblin const &) = default;
+    goblin(goblin const &r)
+            : service_(r.service_)
+            , impl_(r.get_implementation()->shared_from_this()) {}
 
-    goblin &operator=(goblin const &) = default;
+    goblin &operator=(goblin const &) = delete;
 
 public:
     goblin(goblin &&) = default;
@@ -336,6 +223,16 @@ public:
     goblin &operator=(goblin &&) = default;
 
     ~goblin() = default;
+
+    /** compare two goblins for equality.
+     * Two goblins are considered equal if they reference the same internal goblin state.
+     * Two goblin states that happen to share a name are not equal.
+     * A goblin copy is not equal to its parent if the parent has been moved from.
+     * @return
+     */
+    bool operator==(goblin const &r) const {
+        return get_implementation().get() == r.get_implementation().get();
+    }
 
     // boilerplate
 
@@ -348,6 +245,15 @@ public:
         return get_service().get_io_service();
     }
 
+    /** Request the goblin to call a handler when born.
+     * The handler shall be called exactly once, as if by a call to get_executor().post().
+     * The handler will be invoked with the signature void(goblin&). The handler may use the
+     * goblin reference to perform gobliny actions but should not seek to store or copy it as it
+     * maintains a shared reference to the internal goblin state
+     * @tparam Handler
+     * @param handler
+     * @return
+     */
     template<class Handler>
     auto on_birth(Handler &&handler) {
         get_service().on_birth(get_implementation(),
@@ -382,14 +288,12 @@ private:
 };
 
 
-
-
 int main() {
-    std::vector<goblin> goblins;
 
     asio::io_service executor;
-    run_pool pool_of_life(executor);
+    run_pool pool_of_life(executor, "pool of life");
 
+    std::vector<goblin> goblins;
     auto all_dead = [&]() {
         return std::all_of(goblins.begin(),
                            goblins.end(),

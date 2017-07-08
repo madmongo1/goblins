@@ -23,10 +23,11 @@ find_package(Boost REQUIRED COMPONENTS system)
 
 find_package(Doxygen QUIET)
 
-sugar_files(SOURCE_FILES config.hpp main.cpp run_pool.hpp worker_thread_service.hpp)
+sugar_include(src)
 
 add_executable(tiggle ${SOURCE_FILES})
 target_link_libraries(tiggle Boost::system)
+target_include_directories(tiggle PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if (DOXYGEN_FOUND)
     sugar_doxygen_generate(

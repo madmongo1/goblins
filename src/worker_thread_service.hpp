@@ -21,6 +21,6 @@ struct worker_thread_service : asio::detail::service_base<worker_thread_service>
     }
 
     asio::io_service worker_executor_;
-    run_pool worker_pool_ {worker_executor_};
+    run_pool worker_pool_ {worker_executor_, "worker_thread_service"};
 
 };

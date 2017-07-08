@@ -9,8 +9,12 @@
 #include <iostream>
 
 struct run_pool {
-    run_pool(asio::io_service &executor)
-            : executor_(executor) {}
+    run_pool(asio::io_service &executor, std::string identifier)
+            : executor_(executor)
+    , identifier_(std::move(identifier))
+    {
+
+    }
 
     ~run_pool() {
         stop();
@@ -42,7 +46,8 @@ private:
     void run() {
         while (!executor_.stopped()) {
             try {
-                executor_.run();
+                auto ran = executor_.run();
+                std::cout << identifier_ << " ran " << ran << std::endl;
             }
             catch (std::exception const &e) {
                 std::cerr << e.what() << std::endl;
@@ -52,4 +57,5 @@ private:
 
     asio::io_service &executor_;
     std::vector<std::thread> threads_;
+    std::string identifier_;
 };
